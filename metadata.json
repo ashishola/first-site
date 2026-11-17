@@ -1,0 +1,6 @@
+{
+  "name": "VeloCart — Modern Marketplace",
+  "description": "A full-stack Flipkart-inspired e-commerce platform with JWT authentication, smart search, cart & checkout, Razorpay payment flow, order tracking, and admin analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
