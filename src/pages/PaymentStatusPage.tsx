@@ -111,6 +111,22 @@ export function PaymentStatusPage({ mode, orderId }: PaymentStatusPageProps) {
               </div>
             </div>
 
+            {(order.razorpayPaymentId || order.razorpayOrderId) && (
+              <div className="p-3.5 rounded-lg bg-blue-50/70 border border-blue-200/70 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-semibold text-[#172337]">
+                  Razorpay Transaction Verified
+                </span>
+                <div className="flex flex-wrap gap-3 font-mono-num text-slate-700">
+                  {order.razorpayPaymentId && (
+                    <span>Pay ID: {order.razorpayPaymentId}</span>
+                  )}
+                  {order.razorpayOrderId && (
+                    <span>RZP Order: {order.razorpayOrderId}</span>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div>
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
                 Items Ordered

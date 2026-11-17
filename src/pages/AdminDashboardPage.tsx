@@ -496,6 +496,27 @@ export function AdminDashboardPage() {
     }
   };
 
+  const [refundingOrderId, setRefundingOrderId] = useState<string | null>(null);
+
+  const handleRazorpayRefund = async (orderId: string) => {
+    setRefundingOrderId(orderId);
+    try {
+      const res = await apiRequest<{ order: Order; refundId: string }>(
+        '/api/admin/payments/razorpay/refund',
+        {
+          method: 'POST',
+          body: JSON.stringify({ orderId }),
+        }
+      );
+      showToast(`Refund ${res.refundId} processed for ${res.order.orderNumber}`);
+      await loadAdminData();
+    } catch (err) {
+      showToast((err as Error).message, 'error');
+    } finally {
+      setRefundingOrderId(null);
+    }
+  };
+
   const handleSavePaymentSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!paymentSettings) return;
@@ -916,10 +937,17 @@ export function AdminDashboardPage() {
                             <p className="text-xs text-slate-500">{order.customerEmail}</p>
                           </td>
                           <td className="py-3 px-4 text-xs">
-                            <span className="font-semibold text-slate-800">
-                              {order.paymentMethod}
-                            </span>{' '}
-                            · {order.paymentStatus}
+                            <p>
+                              <span className="font-semibold text-slate-800">
+                                {order.paymentMethod}
+                              </span>{' '}
+                              · {order.paymentStatus}
+                            </p>
+                            {order.razorpayPaymentId && (
+                              <p className="font-mono-num text-[11px] text-slate-500 mt-0.5">
+                                {order.razorpayPaymentId}
+                              </p>
+                            )}
                           </td>
                           <td className="py-3 px-4 text-right font-mono-num font-bold text-slate-900">
                             {formatINR(order.total)}
@@ -1534,6 +1562,96 @@ export function AdminDashboardPage() {
                       />
                     </div>
                   </div>
+                </div>
+
+                {/* Recent Razorpay Online Transactions */}
+                <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
+                  <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="font-display text-base font-bold text-slate-900">
+                        Recent Razorpay Transactions
+                      </h3>
+                      <p className="text-xs text-slate-500">
+                        Online UPI, Card, and Razorpay Checkout payments with instant refund support.
+                      </p>
+                    </div>
+                    <span className="text-xs font-semibold text-slate-500">
+                      {orders.filter((o) => o.paymentMethod !== 'COD').length} transactions
+                    </span>
+                  </div>
+
+                  {orders.filter((o) => o.paymentMethod !== 'COD').length === 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-500">
+                      No online Razorpay transactions recorded yet.
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs sm:text-sm">
+                        <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 text-xs">
+                          <tr>
+                            <th className="py-2.5 px-4 font-semibold">Order</th>
+                            <th className="py-2.5 px-4 font-semibold">Customer</th>
+                            <th className="py-2.5 px-4 font-semibold">Method</th>
+                            <th className="py-2.5 px-4 font-semibold">Razorpay Ref</th>
+                            <th className="py-2.5 px-4 font-semibold text-right">Amount</th>
+                            <th className="py-2.5 px-4 font-semibold">Status</th>
+                            <th className="py-2.5 px-4 font-semibold text-right">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {orders
+                            .filter((o) => o.paymentMethod !== 'COD')
+                            .slice(0, 10)
+                            .map((o) => (
+                              <tr key={o.id} className="hover:bg-slate-50">
+                                <td className="py-2.5 px-4 font-mono-num font-bold text-slate-900">
+                                  {o.orderNumber}
+                                </td>
+                                <td className="py-2.5 px-4 text-slate-700">{o.customerName}</td>
+                                <td className="py-2.5 px-4 font-semibold text-slate-800">
+                                  {o.paymentMethod}
+                                </td>
+                                <td className="py-2.5 px-4 font-mono-num text-xs text-slate-500">
+                                  {o.razorpayPaymentId || o.razorpayOrderId || 'Pending'}
+                                </td>
+                                <td className="py-2.5 px-4 text-right font-mono-num font-bold text-slate-900">
+                                  {formatINR(o.total)}
+                                </td>
+                                <td className="py-2.5 px-4">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                                      o.paymentStatus === 'Paid'
+                                        ? 'bg-emerald-50 text-emerald-700'
+                                        : o.paymentStatus === 'Refunded'
+                                          ? 'bg-blue-50 text-[#2874F0]'
+                                          : o.paymentStatus === 'Failed'
+                                            ? 'bg-rose-50 text-rose-700'
+                                            : 'bg-amber-50 text-amber-800'
+                                    }`}
+                                  >
+                                    {o.paymentStatus}
+                                  </span>
+                                </td>
+                                <td className="py-2.5 px-4 text-right">
+                                  {o.paymentStatus === 'Paid' ? (
+                                    <button
+                                      type="button"
+                                      disabled={refundingOrderId === o.id}
+                                      onClick={() => void handleRazorpayRefund(o.id)}
+                                      className="px-2.5 py-1 rounded border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold disabled:opacity-50"
+                                    >
+                                      {refundingOrderId === o.id ? 'Refunding...' : 'Refund'}
+                                    </button>
+                                  ) : (
+                                    <span className="text-xs text-slate-400">—</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               </form>
             )}

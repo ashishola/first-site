@@ -950,12 +950,26 @@ async function startServer() {
               amount: Math.round(order.total * 100),
               currency: 'INR',
               receipt: order.orderNumber,
+              notes: {
+                shopkartOrderId: order.id,
+                customerEmail: order.customerEmail,
+                paymentMethod: order.paymentMethod,
+              },
             }),
           });
-          if (response.ok) {
-            const data = (await response.json()) as { id: string };
-            razorpayOrderId = data.id;
+          if (!response.ok) {
+            const errData = (await response.json().catch(() => ({}))) as {
+              error?: { description?: string };
+            };
+            res.status(502).json({
+              error:
+                errData.error?.description ||
+                'Unable to create Razorpay order. Check Razorpay API keys.',
+            });
+            return;
           }
+          const data = (await response.json()) as { id: string };
+          razorpayOrderId = data.id;
         }
 
         order.razorpayOrderId = razorpayOrderId;
@@ -1020,17 +1034,35 @@ async function startServer() {
         const rzpPayment =
           razorpayPaymentId || `pay_rzp_${crypto.randomBytes(6).toString('hex')}`;
 
-        // Verify cryptographic HMAC signature if live Razorpay or provided signature
-        if (rzp.isLive && razorpaySignature) {
+        // Verify cryptographic HMAC-SHA256 signature
+        if (rzp.isLive) {
+          if (!razorpaySignature || !razorpayPaymentId) {
+            order.paymentStatus = 'Failed';
+            order.updatedAt = now;
+            await saveDb();
+            res.status(400).json({
+              verified: false,
+              error: 'Missing Razorpay payment signature.',
+            });
+            return;
+          }
           const expected = crypto
             .createHmac('sha256', rzp.keySecret)
             .update(`${rzpOrder}|${rzpPayment}`)
             .digest('hex');
-          if (expected !== razorpaySignature) {
+          const expectedBuf = Buffer.from(expected, 'utf8');
+          const sigBuf = Buffer.from(razorpaySignature, 'utf8');
+          if (
+            expectedBuf.length !== sigBuf.length ||
+            !crypto.timingSafeEqual(expectedBuf, sigBuf)
+          ) {
             order.paymentStatus = 'Failed';
             order.updatedAt = now;
             await saveDb();
-            res.status(400).json({ verified: false, error: 'Payment signature verification failed.' });
+            res.status(400).json({
+              verified: false,
+              error: 'Payment signature verification failed.',
+            });
             return;
           }
         }
@@ -1052,7 +1084,7 @@ async function startServer() {
         order.timeline[0] = {
           status: 'Confirmed',
           timestamp: now,
-          note: `Online payment verified (${order.paymentMethod}) · Ref ${rzpPayment}`,
+          note: `Razorpay payment verified (${order.paymentMethod}) · Ref ${rzpPayment}`,
         };
         order.updatedAt = now;
 
@@ -1060,7 +1092,7 @@ async function startServer() {
           id: makeId('notif'),
           userId: req.user!.id,
           title: `Payment Successful · ${order.orderNumber}`,
-          message: `₹${order.total.toLocaleString('en-IN')} paid successfully. Your items are being packed.`,
+          message: `₹${order.total.toLocaleString('en-IN')} paid successfully via Razorpay. Your items are being packed.`,
           type: 'order',
           read: false,
           link: `/payment/success/${order.id}`,
@@ -1069,6 +1101,132 @@ async function startServer() {
 
         await saveDb();
         res.json({ verified: true, order });
+      } catch (err) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/payments/razorpay/fail',
+    requireAuth,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { orderId, reason } = req.body as {
+          orderId?: string;
+          reason?: string;
+        };
+        const db = getDb();
+        const order = db.orders.find(
+          (o) => o.id === orderId && o.userId === req.user!.id
+        );
+        if (!order) {
+          res.status(404).json({ error: 'Order not found.' });
+          return;
+        }
+        if (order.paymentStatus !== 'Paid') {
+          order.paymentStatus = 'Failed';
+          order.updatedAt = new Date().toISOString();
+          order.timeline.push({
+            status: order.status,
+            timestamp: order.updatedAt,
+            note: reason?.trim() || 'Razorpay payment failed or cancelled by customer',
+          });
+          await saveDb();
+        }
+        res.json({ order });
+      } catch (err) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/admin/payments/razorpay/refund',
+    requireAuth,
+    requireAdminOrSeller,
+    async (req, res) => {
+      try {
+        const { orderId } = req.body as { orderId?: string };
+        const db = getDb();
+        const order = db.orders.find((o) => o.id === orderId);
+        if (!order) {
+          res.status(404).json({ error: 'Order not found.' });
+          return;
+        }
+        if (order.paymentStatus !== 'Paid') {
+          res.status(400).json({ error: 'Only Paid orders can be refunded.' });
+          return;
+        }
+
+        const rzp = getRazorpayConfig();
+        let refundId = `rfnd_${crypto.randomBytes(6).toString('hex')}`;
+
+        if (rzp.isLive && order.razorpayPaymentId) {
+          const authHeader = Buffer.from(`${rzp.keyId}:${rzp.keySecret}`).toString(
+            'base64'
+          );
+          const response = await fetch(
+            `https://api.razorpay.com/v1/payments/${encodeURIComponent(order.razorpayPaymentId)}/refund`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Basic ${authHeader}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                amount: Math.round(order.total * 100),
+                notes: { orderNumber: order.orderNumber },
+              }),
+            }
+          );
+          if (!response.ok) {
+            const errData = (await response.json().catch(() => ({}))) as {
+              error?: { description?: string };
+            };
+            res.status(502).json({
+              error:
+                errData.error?.description ||
+                'Razorpay refund request failed.',
+            });
+            return;
+          }
+          const refundData = (await response.json()) as { id: string };
+          refundId = refundData.id;
+        }
+
+        const now = new Date().toISOString();
+        order.paymentStatus = 'Refunded';
+        if (order.status !== 'Cancelled') {
+          order.status = 'Cancelled';
+          for (const item of order.items) {
+            const prod = db.products.find((p) => p.id === item.productId);
+            if (prod) {
+              prod.stock += item.quantity;
+              prod.soldCount = Math.max(0, prod.soldCount - item.quantity);
+            }
+          }
+        }
+        order.timeline.push({
+          status: 'Cancelled',
+          timestamp: now,
+          note: `Razorpay refund processed · Ref ${refundId}`,
+        });
+        order.updatedAt = now;
+
+        db.notifications.unshift({
+          id: makeId('notif'),
+          userId: order.userId,
+          title: `Refund Issued · ${order.orderNumber}`,
+          message: `₹${order.total.toLocaleString('en-IN')} has been refunded (${refundId}).`,
+          type: 'order',
+          read: false,
+          link: '/account?tab=orders',
+          createdAt: now,
+        });
+
+        await saveDb();
+        res.json({ order, refundId });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });
       }

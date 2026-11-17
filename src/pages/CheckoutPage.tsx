@@ -14,6 +14,49 @@ import { apiRequest, formatINR } from '../lib/api.ts';
 import { useStore } from '../context/StoreContext.tsx';
 import type { Address, Coupon, Order, PaymentMethod, PaymentSettings } from '../types.ts';
 
+interface RazorpayHandlerResponse {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+}
+
+interface RazorpayInstance {
+  open: () => void;
+  on: (
+    event: 'payment.failed',
+    cb: (response: { error?: { description?: string } }) => void
+  ) => void;
+}
+
+declare global {
+  interface Window {
+    Razorpay?: new (options: Record<string, unknown>) => RazorpayInstance;
+  }
+}
+
+function loadRazorpayScript(): Promise<boolean> {
+  if (typeof window === 'undefined') return Promise.resolve(false);
+  if (window.Razorpay) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    const existing = document.querySelector<HTMLScriptElement>(
+      'script[src="https://checkout.razorpay.com/v1/checkout.js"]'
+    );
+    if (existing) {
+      existing.addEventListener('load', () => resolve(Boolean(window.Razorpay)));
+      existing.addEventListener('error', () => resolve(false));
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    script.async = true;
+    script.onload = () => resolve(Boolean(window.Razorpay));
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+}
+
 export function CheckoutPage() {
   const {
     user,
@@ -205,11 +248,97 @@ export function CheckoutPage() {
 
       const rzpRes = await apiRequest<{
         razorpayOrderId: string;
+        amount: number;
+        currency: string;
         keyId: string;
+        isLive: boolean;
       }>('/api/payments/razorpay/order', {
         method: 'POST',
         body: JSON.stringify({ orderId: createdOrder.id }),
       });
+
+      if (rzpRes.isLive) {
+        const sdkLoaded = await loadRazorpayScript();
+        if (sdkLoaded && window.Razorpay) {
+          const rzpInstance = new window.Razorpay({
+            key: rzpRes.keyId,
+            amount: rzpRes.amount,
+            currency: rzpRes.currency,
+            name: 'ShopKart',
+            description: `Order ${createdOrder.orderNumber}`,
+            order_id: rzpRes.razorpayOrderId,
+            prefill: {
+              name: user.name,
+              email: user.email,
+              contact: shippingAddress.phone,
+            },
+            notes: {
+              orderNumber: createdOrder.orderNumber,
+              preferredMethod: paymentMethod,
+            },
+            theme: {
+              color: '#2874F0',
+            },
+            handler: async (response: RazorpayHandlerResponse) => {
+              try {
+                const verifyRes = await apiRequest<{ verified: boolean; order: Order }>(
+                  '/api/payments/razorpay/verify',
+                  {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      orderId: createdOrder.id,
+                      razorpayOrderId: response.razorpay_order_id,
+                      razorpayPaymentId: response.razorpay_payment_id,
+                      razorpaySignature: response.razorpay_signature,
+                    }),
+                  }
+                );
+                if (verifyRes.verified) {
+                  clearCartLocal();
+                  await refreshUser();
+                  navigate(`/payment/success/${verifyRes.order.id}`);
+                }
+              } catch (err) {
+                navigate(
+                  `/payment/failure?orderId=${encodeURIComponent(createdOrder.id)}&reason=${encodeURIComponent(
+                    (err as Error).message
+                  )}`
+                );
+              }
+            },
+            modal: {
+              ondismiss: async () => {
+                await apiRequest('/api/payments/razorpay/fail', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    orderId: createdOrder.id,
+                    reason: 'Razorpay checkout cancelled by user',
+                  }),
+                }).catch(() => {});
+                showToast('Payment cancelled. You can retry anytime.', 'info');
+              },
+            },
+          });
+
+          rzpInstance.on('payment.failed', async (failEvent) => {
+            const reason =
+              failEvent.error?.description ||
+              'Payment declined by Razorpay / issuing bank.';
+            await apiRequest('/api/payments/razorpay/fail', {
+              method: 'POST',
+              body: JSON.stringify({ orderId: createdOrder.id, reason }),
+            }).catch(() => {});
+            navigate(
+              `/payment/failure?orderId=${encodeURIComponent(createdOrder.id)}&reason=${encodeURIComponent(
+                reason
+              )}`
+            );
+          });
+
+          rzpInstance.open();
+          return;
+        }
+      }
 
       setRazorpayModal({
         order: createdOrder,
@@ -451,11 +580,16 @@ export function CheckoutPage() {
 
           {/* Step 2: Payment Options */}
           <section className="bg-white rounded-xl border border-slate-200/80 overflow-hidden">
-            <div className="px-6 py-4 bg-[#2874F0] text-white flex items-center gap-2.5">
-              <span className="w-6 h-6 rounded bg-white text-[#2874F0] text-xs font-bold flex items-center justify-center">
-                2
+            <div className="px-6 py-4 bg-[#2874F0] text-white flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5">
+                <span className="w-6 h-6 rounded bg-white text-[#2874F0] text-xs font-bold flex items-center justify-center">
+                  2
+                </span>
+                <h2 className="font-display text-base font-bold">Payment Method</h2>
+              </div>
+              <span className="text-[11px] font-semibold bg-white/15 px-2.5 py-1 rounded text-[#FFE500]">
+                Secured by Razorpay
               </span>
-              <h2 className="font-display text-base font-bold">Payment Method</h2>
             </div>
 
             <div className="p-5 sm:p-6 divide-y divide-slate-100">
